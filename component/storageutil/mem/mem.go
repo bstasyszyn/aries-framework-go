@@ -255,6 +255,11 @@ func (m *memStore) GetBulk(keys ...string) ([][]byte, error) {
 	return values, nil
 }
 
+type queryResult struct {
+	keys      []string
+	dbEntries []dbEntry
+}
+
 // Query returns all data that satisfies the expression. Expression format: TagName:TagValue.
 // If TagValue is not provided, then all data associated with the TagName will be returned.
 // For now, expression can only be a single tag Name + Value pair.
@@ -272,30 +277,66 @@ func (m *memStore) Query(expression string, options ...spi.QueryOption) (spi.Ite
 		return nil, errInvalidQueryExpressionFormat
 	}
 
-	expressionSplit := strings.Split(expression, ":")
-	switch len(expressionSplit) {
-	case expressionTagNameOnlyLength:
-		expressionTagName := expressionSplit[0]
+	queryResults := make(map[string]*queryResult)
 
-		m.RLock()
-		defer m.RUnlock()
+	for _, exp := range strings.Split(expression, "&&") {
+		expressionSplit := strings.Split(exp, ":")
+		switch len(expressionSplit) {
+		case expressionTagNameOnlyLength:
+			expressionTagName := expressionSplit[0]
 
-		keys, dbEntries := m.getMatchingKeysAndDBEntries(expressionTagName, "")
+			m.RLock()
+			defer m.RUnlock()
 
-		return &memIterator{keys: keys, dbEntries: dbEntries}, nil
-	case expressionTagNameAndValueLength:
-		expressionTagName := expressionSplit[0]
-		expressionTagValue := expressionSplit[1]
+			keys, dbEntries := m.getMatchingKeysAndDBEntries(expressionTagName, "")
 
-		m.RLock()
-		defer m.RUnlock()
+			queryResults[expressionTagName] = &queryResult{keys: keys, dbEntries: dbEntries}
+		case expressionTagNameAndValueLength:
+			expressionTagName := expressionSplit[0]
+			expressionTagValue := expressionSplit[1]
 
-		keys, dbEntries := m.getMatchingKeysAndDBEntries(expressionTagName, expressionTagValue)
+			m.RLock()
+			defer m.RUnlock()
 
-		return &memIterator{keys: keys, dbEntries: dbEntries}, nil
-	default:
-		return nil, errInvalidQueryExpressionFormat
+			keys, dbEntries := m.getMatchingKeysAndDBEntries(expressionTagName, expressionTagValue)
+
+			queryResults[expressionTagName] = &queryResult{keys: keys, dbEntries: dbEntries}
+		default:
+			return nil, fmt.Errorf("query expression [%s], sub-expression [%s]: %w",
+				expression, exp, errInvalidQueryExpressionFormat)
+		}
 	}
+
+	keys, dbEntries := commonKeys(queryResults)
+
+	return &memIterator{keys: keys, dbEntries: dbEntries}, nil
+}
+
+func commonKeys(results map[string]*queryResult) ([]string, []dbEntry) {
+	keyMap := make(map[string]int)
+	valueMap := make(map[string]dbEntry)
+
+	for _, result := range results {
+		for i, k := range result.keys {
+			keyMap[k]++
+			valueMap[k] = result.dbEntries[i]
+		}
+	}
+
+	var keys []string
+
+	var values []dbEntry
+
+	// Return the keys that have all N tags
+
+	for k, n := range keyMap {
+		if n == len(results) {
+			keys = append(keys, k)
+			values = append(values, valueMap[k])
+		}
+	}
+
+	return keys, values
 }
 
 // Delete deletes the key + value pair (and all tags) associated with key.
